@@ -1,61 +1,90 @@
+import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
+from pypfopt import EfficientFrontier, expected_returns, risk_models
 
-from pypfopt import EfficientFrontier, risk_models, expected_returns, plotting
+# Evita erro de estilo
+plt.style.use("ggplot")
 
-# Ativos e alocações fornecidas
-tickers = [
+st.set_page_config(page_title="Otimização da Carteira - Sharpe Máximo", layout="wide")
+st.title("Otimização da Carteira com Índice de Sharpe")
+
+st.sidebar.header("Configurações da Carteira")
+
+# Ativos e alocações iniciais
+ativos = [
     "AGRO3.SA", "BBAS3.SA", "BBSE3.SA", "BPAC11.SA", "EGIE3.SA", "ITUB3.SA", "PRIO3.SA",
     "PSSA3.SA", "SAPR3.SA", "SBSP3.SA", "VIVT3.SA", "WEGE3.SA", "TOTS3.SA", "B3SA3.SA", "TAEE3.SA"
 ]
 
-pesos_atuais = np.array([
+pesos_atuais = [
     0.10, 0.012, 0.065, 0.106, 0.05, 0.005, 0.15,
     0.15, 0.067, 0.04, 0.064, 0.15, 0.01, 0.001, 0.03
-])
+]
 
-# Baixando dados dos últimos 7 anos
-dados = yf.download(tickers, start="2018-04-01", end="2025-04-01")["Adj Close"]
-dados = dados.dropna()
+carteira_df = pd.DataFrame({"Ativo": ativos, "Peso Atual": pesos_atuais})
 
-# Retornos diários e anuais esperados
-retornos_diarios = dados.pct_change().dropna()
+# Período de análise
+anos = st.sidebar.slider("Anos de histórico", 3, 10, 7)
+
+st.sidebar.markdown("---")
+st.sidebar.dataframe(carteira_df.set_index("Ativo"))
+
+# Coleta de dados
+st.subheader("1. Coleta de dados históricos")
+with st.spinner("Baixando dados..."):
+    dados = yf.download(ativos, period=f"{anos}y")['Adj Close'].dropna()
+    st.success("Dados carregados com sucesso!")
+    st.line_chart(dados)
+
+# Retornos e covariância
+st.subheader("2. Cálculo de métricas")
 retornos_anuais = expected_returns.mean_historical_return(dados, frequency=252)
-
-# Matriz de covariância
 matriz_cov = risk_models.sample_cov(dados, frequency=252)
 
-# Índice de Sharpe da carteira atual
-retorno_port_atual = np.dot(pesos_atuais, retornos_anuais)
-vol_port_atual = np.sqrt(np.dot(pesos_atuais.T, np.dot(matriz_cov, pesos_atuais)))
-sharpe_atual = (retorno_port_atual - 0.0) / vol_port_atual  # Rf = 0
+# Sharpe da carteira atual
+peso_array = np.array(pesos_atuais)
+retorno_atual = np.dot(peso_array, retornos_anuais)
+vol_atual = np.sqrt(np.dot(peso_array.T, np.dot(matriz_cov, peso_array)))
+sharpe_atual = retorno_atual / vol_atual
 
-print(f"Retorno esperado (atual): {retorno_port_atual:.2%}")
-print(f"Volatilidade (atual): {vol_port_atual:.2%}")
-print(f"Índice de Sharpe (atual): {sharpe_atual:.2f}")
+col1, col2, col3 = st.columns(3)
+col1.metric("Retorno Esperado (Atual)", f"{retorno_atual:.2%}")
+col2.metric("Volatilidade (Atual)", f"{vol_atual:.2%}")
+col3.metric("Sharpe (Atual)", f"{sharpe_atual:.2f}")
 
-# Otimização com PyPortfolioOpt
+# Otimização
+st.subheader("3. Otimização da carteira")
 ef = EfficientFrontier(retornos_anuais, matriz_cov)
 pesos_otimizados = ef.max_sharpe()
-limpos = ef.clean_weights()
+pesos_limpos = ef.clean_weights()
+retorno_opt, vol_opt, sharpe_opt = ef.portfolio_performance()
 
-print("\nPesos otimizados para máximo Sharpe:")
-for ativo, peso in limpos.items():
-    print(f"{ativo}: {peso:.2%}")
+col1, col2, col3 = st.columns(3)
+col1.metric("Retorno Otimizado", f"{retorno_opt:.2%}")
+col2.metric("Volatilidade Otimizada", f"{vol_opt:.2%}")
+col3.metric("Sharpe Otimizado", f"{sharpe_opt:.2f}")
 
-# Desempenho da carteira otimizada
-ret, vol, sharpe = ef.portfolio_performance(verbose=True)
+# Comparação
+st.subheader("4. Comparação gráfica")
+fig, ax = plt.subplots(figsize=(10, 5))
 
-# Comparando graficamente
-plt.figure(figsize=(10, 6))
-sns.barplot(x=tickers, y=pesos_atuais, color='blue', label='Atual')
-sns.barplot(x=list(limpos.keys()), y=list(limpos.values()), color='green', alpha=0.6, label='Otimizado')
-plt.xticks(rotation=45)
-plt.ylabel("Alocação")
-plt.title("Comparação entre Carteira Atual e Otimizada")
-plt.legend()
-plt.tight_layout()
-plt.show()
+indices = np.arange(len(ativos))
+largura = 0.35
+
+ax.bar(indices - largura/2, pesos_atuais, largura, label='Atual', color='blue')
+ax.bar(indices + largura/2, [pesos_limpos[a] for a in ativos], largura, label='Otimizado', color='green')
+
+ax.set_xticks(indices)
+ax.set_xticklabels(ativos, rotation=45)
+ax.set_ylabel('Alocação (%)')
+ax.set_title('Comparação de Alocação por Ativo')
+ax.legend()
+st.pyplot(fig)
+
+# Exportar resultados
+st.subheader("5. Pesos otimizados")
+st.dataframe(pd.DataFrame.from_dict(pesos_limpos, orient='index', columns=['Peso (%)']).applymap(lambda x: f"{x*100:.2f}%"))
+
