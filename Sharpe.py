@@ -2,91 +2,87 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from pypfopt import expected_returns, risk_models
 from sklearn.covariance import LedoitWolf
-import matplotlib.pyplot as plt
 
-st.set_page_config(layout="wide")
-
-st.title("Otimização de Carteira com Monte Carlo - Máximo Sharpe")
+# Título do app
+st.title("Otimização de Carteira - Melhor Sharpe com Monte Carlo")
 
 # Entradas do usuário
-st.subheader("Parâmetros da carteira")
-num_ativos = st.number_input("Número de ativos", min_value=2, max_value=30, value=5)
-anos = st.slider("Anos de histórico", min_value=1, max_value=10, value=7)
+st.header("Parâmetros da Carteira")
+anos = st.slider("Quantos anos de histórico?", min_value=1, max_value=10, value=7)
 
-tickers = []
-pesos_iniciais = []
-pesos_min = []
-pesos_max = []
+st.subheader("Informações dos Ativos")
+ativos_df = st.data_editor(
+    pd.DataFrame({
+        "Ticker": ["AGRO3.SA", "BBAS3.SA", "BBSE3.SA", "BPAC11.SA", "EGIE3.SA", "ITUB3.SA", "PRIO3.SA", 
+                   "PSSA3.SA", "SAPR3.SA", "SBSP3.SA", "VIVT3.SA", "WEGE3.SA", "TOTS3.SA", "B3SA3.SA", "TAEE3.SA"],
+        "Peso Inicial (%)": [10, 1.2, 6.5, 10.6, 5, 0.5, 15, 15, 6.7, 4, 6.4, 15, 1, 0.1, 3],
+        "Min (%)": [0]*15,
+        "Max (%)": [30]*15
+    }),
+    num_rows="fixed",
+)
 
-st.subheader("Configuração dos ativos")
-for i in range(num_ativos):
-    col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
-    with col1:
-        ticker = st.text_input(f"Ticker {i+1}", key=f"ticker_{i}")
-    with col2:
-        peso = st.number_input(f"Peso inicial (%)", min_value=0.0, max_value=100.0, value=10.0, key=f"peso_{i}")
-    with col3:
-        pmin = st.number_input("Alocação mín. (%)", min_value=0.0, max_value=100.0, value=0.0, key=f"min_{i}")
-    with col4:
-        pmax = st.number_input("Alocação máx. (%)", min_value=0.0, max_value=100.0, value=100.0, key=f"max_{i}")
-    
-    if ticker:
-        tickers.append(ticker.upper())
-        pesos_iniciais.append(peso / 100)
-        pesos_min.append(pmin / 100)
-        pesos_max.append(pmax / 100)
+# Processar entradas
+tickers = ativos_df["Ticker"].tolist()
+pesos_iniciais = np.array(ativos_df["Peso Inicial (%)"].tolist()) / 100
+pesos_min = np.array(ativos_df["Min (%)"].tolist()) / 100
+pesos_max = np.array(ativos_df["Max (%)"].tolist()) / 100
 
-# Botão de cálculo
-if st.button("Rodar simulação Monte Carlo"):
-    with st.spinner("Baixando dados e simulando..."):
+# Baixar dados
+st.write("Baixando dados...")
+raw_data = yf.download(tickers, period=f"{anos}y", group_by="ticker", auto_adjust=True)
 
-        # Baixar dados de preço ajustado
-        raw_data = yf.download(tickers, period=f"{anos}y")["Adj Close"]
+# Corrigir estrutura dos dados
+if isinstance(raw_data.columns, pd.MultiIndex):
+    dados = pd.DataFrame({ticker: raw_data[ticker]["Close"] for ticker in tickers})
+else:
+    dados = raw_data[["Close"]]
+    dados.columns = [tickers[0]]
 
-        # Preencher faltantes e limpar
-        dados = raw_data.dropna()
+dados = dados.dropna()
 
-        # Retornos esperados e matriz de covariância
-        mu = expected_returns.mean_historical_return(dados)
-        S = risk_models.CovarianceShrinkage(dados).ledoit_wolf()
+# Retornos
+retornos = dados.pct_change().dropna()
 
-        # Simulação Monte Carlo
-        n_simul = 20_000
-        results = []
-        for _ in range(n_simul):
-            pesos = np.random.dirichlet(np.ones(len(tickers)), 1).flatten()
+# Matriz de covariância (Ledoit-Wolf)
+st.write("Calculando matriz de covariância...")
+cov_matrix = LedoitWolf().fit(retornos).covariance_
+media_retornos = retornos.mean()
 
-            # Respeitar restrições
-            if any(p < minv or p > maxv for p, minv, maxv in zip(pesos, pesos_min, pesos_max)):
-                continue
+# Simulação de Monte Carlo
+st.write("Rodando simulação Monte Carlo...")
+num_simulacoes = 50_000
+resultados = []
+pesos_lista = []
 
-            ret = np.dot(pesos, mu)
-            vol = np.sqrt(np.dot(pesos.T, np.dot(S, pesos)))
-            sharpe = ret / vol
-            results.append((pesos, ret, vol, sharpe))
+np.random.seed(42)
+for _ in range(num_simulacoes):
+    pesos = np.random.dirichlet(np.ones(len(tickers)), size=1).flatten()
 
-        # Ordenar por Sharpe
-        melhores = sorted(results, key=lambda x: x[3], reverse=True)
-        melhor_pesos, melhor_ret, melhor_vol, melhor_sharpe = melhores[0]
+    # Respeitar restrições
+    if np.all(pesos >= pesos_min) and np.all(pesos <= pesos_max):
+        retorno_esperado = np.dot(pesos, media_retornos) * 252
+        volatilidade = np.sqrt(np.dot(pesos.T, np.dot(cov_matrix * 252, pesos)))
+        sharpe = retorno_esperado / volatilidade
+        resultados.append([retorno_esperado, volatilidade, sharpe])
+        pesos_lista.append(pesos)
 
-        # Exibir resultados
-        st.success("Carteira com melhor Sharpe encontrada!")
-        df_result = pd.DataFrame({
-            "Ticker": tickers,
-            "Peso (%)": (melhor_pesos * 100).round(2)
-        })
-        st.dataframe(df_result)
+# Obter melhor resultado
+resultados = np.array(resultados)
+melhor_indice = np.argmax(resultados[:, 2])
+melhor_pesos = pesos_lista[melhor_indice]
+melhor_retorno, melhor_vol, melhor_sharpe = resultados[melhor_indice]
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Retorno esperado anual", f"{melhor_ret:.2%}")
-        col2.metric("Volatilidade anual", f"{melhor_vol:.2%}")
-        col3.metric("Índice de Sharpe", f"{melhor_sharpe:.2f}")
+# Resultado final
+st.subheader("Resultados")
+st.metric("Retorno Esperado (%)", f"{melhor_retorno*100:.2f}")
+st.metric("Volatilidade Anual (%)", f"{melhor_vol*100:.2f}")
+st.metric("Índice de Sharpe", f"{melhor_sharpe:.2f}")
 
-        # Gráfico de pizza
-        fig, ax = plt.subplots()
-        ax.pie(melhor_pesos, labels=tickers, autopct="%1.1f%%", startangle=90)
-        ax.axis("equal")
-        st.pyplot(fig)
-        
+st.subheader("Alocação Otimizada")
+df_resultado = pd.DataFrame({
+    "Ticker": tickers,
+    "Alocação Ideal (%)": melhor_pesos * 100
+})
+st.dataframe(df_resultado.style.format({"Alocação Ideal (%)": "{:.2f}"}))
