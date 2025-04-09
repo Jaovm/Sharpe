@@ -43,7 +43,7 @@ if st.button("Otimizar Carteira"):
     S = risk_models.CovarianceShrinkage(dados).ledoit_wolf()
 
     # Simulação de Monte Carlo
-    n_simulacoes = 10000000
+    n_simulacoes = 5000000
     resultados = []
     pesos_simulados = []
 
