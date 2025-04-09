@@ -36,9 +36,14 @@ st.sidebar.dataframe(carteira_df.set_index("Ativo"))
 # Coleta de dados
 st.subheader("1. Coleta de dados históricos")
 with st.spinner("Baixando dados..."):
-    dados = yf.download(ativos, period=f"{anos}y")["Adj Close"]
-    if isinstance(dados.columns, pd.MultiIndex):
-        dados = dados.droplevel(0, axis=1)
+    raw_data = yf.download(ativos, period=f"{anos}y")
+
+    if isinstance(raw_data.columns, pd.MultiIndex):
+        dados = raw_data['Adj Close'].copy()
+        dados.columns.name = None
+    else:
+        dados = raw_data.copy()
+
     dados = dados.dropna()
     st.success("Dados carregados com sucesso!")
     st.line_chart(dados)
@@ -95,4 +100,3 @@ st.pyplot(fig)
 # Exportar resultados
 st.subheader("5. Pesos otimizados")
 st.dataframe(pd.DataFrame.from_dict(pesos_limpos, orient='index', columns=['Peso (%)']).applymap(lambda x: f"{x*100:.2f}%"))
-
