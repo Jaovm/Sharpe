@@ -2,81 +2,77 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from pypfopt import expected_returns, risk_models, EfficientFrontier
+from pypfopt import expected_returns, risk_models
+from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 
-# Configurações da página
-st.set_page_config(layout="wide")
-st.title("Otimização de Carteira - Máximo Sharpe")
+st.set_page_config(page_title="Otimização de Carteira - Sharpe", layout="wide")
+st.title("Otimização de Carteira usando Simulação de Monte Carlo para Melhor Sharpe")
 
-# Ativos e período
-ativos = [
-    "AGRO3.SA", "BBAS3.SA", "BBSE3.SA", "BPAC11.SA", "EGIE3.SA", "ITUB3.SA",
-    "PRIO3.SA", "PSSA3.SA", "SAPR3.SA", "SBSP3.SA", "VIVT3.SA", "WEGE3.SA",
-    "TOTS3.SA", "B3SA3.SA", "TAEE3.SA"
-]
-anos = 7
+# Entradas do usuário
+st.sidebar.header("Parâmetros da Carteira")
+tickers = st.sidebar.text_area("Tickers separados por vírgula", value="AGRO3.SA,BBAS3.SA,BBSE3.SA,BPAC11.SA,EGIE3.SA,ITUB3.SA,PRIO3.SA,PSSA3.SA,SAPR3.SA,SBSP3.SA,VIVT3.SA,WEGE3.SA,TOTS3.SA,B3SA3.SA,TAEE3.SA")
+tickers = [t.strip().upper() for t in tickers.split(",")]
 
-# Baixar dados
-st.subheader("1. Coleta de dados históricos")
-with st.spinner("Baixando dados dos ativos..."):
-    raw_data = yf.download(ativos, period=f"{anos}y", group_by="ticker", auto_adjust=True)
+anos = st.sidebar.slider("Período (anos)", 1, 10, 7)
 
-    try:
-        dados = pd.concat([raw_data[ticker]["Close"] for ticker in ativos], axis=1)
-        dados.columns = ativos
-    except KeyError:
-        st.error("Erro ao acessar os dados de fechamento dos ativos.")
-        st.stop()
+st.sidebar.subheader("Alocação Inicial e Restrições")
+pesos_iniciais = []
+limites_min = []
+limites_max = []
 
-# Pré-processamento robusto
+for ticker in tickers:
+    col1, col2, col3 = st.sidebar.columns([1, 1, 1])
+    with col1:
+        peso = st.number_input(f"{ticker} (%)", min_value=0.0, max_value=100.0, value=5.0, step=0.1, key=f"peso_{ticker}") / 100
+    with col2:
+        min_val = st.number_input(f"Min {ticker} (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.1, key=f"min_{ticker}") / 100
+    with col3:
+        max_val = st.number_input(f"Max {ticker} (%)", min_value=0.0, max_value=100.0, value=1.0, step=0.1, key=f"max_{ticker}")
+        max_val /= 100
+    pesos_iniciais.append(peso)
+    limites_min.append(min_val)
+    limites_max.append(max_val)
+
+# Baixar dados de preços
+raw_data = yf.download(tickers, period=f"{anos}y", group_by="ticker")
+dados = pd.DataFrame({ticker: raw_data[ticker]['Adj Close'] for ticker in tickers})
 dados = dados.dropna()
-dados = dados.astype(float)
 
-if dados.isnull().values.any() or np.isinf(dados.values).any():
-    st.error("Dados contêm valores inválidos (NaN ou inf). Verifique os ativos ou ajuste o período.")
-    st.stop()
-
-st.success("Dados carregados e validados com sucesso!")
-st.line_chart(dados)
-
-# Retornos e risco
-st.subheader("2. Cálculo de retornos e risco")
+# Retornos esperados e matriz de covariância
 mu = expected_returns.mean_historical_return(dados)
-try:
-    S = risk_models.CovarianceShrinkage(dados).ledoit_wolf()
-except Exception as e:
-    st.error(f"Erro ao calcular a matriz de covariância: {e}")
-    st.stop()
+S = risk_models.CovarianceShrinkage(dados).ledoit_wolf()
 
-# Otimização
-st.subheader("3. Otimização da carteira (Sharpe Máximo)")
-try:
-    ef = EfficientFrontier(mu, S)
-    pesos_otimizados = ef.max_sharpe()
-    limpos = ef.clean_weights()
-    ret, vol, sharpe = ef.portfolio_performance()
-except Exception as e:
-    st.error(f"Erro durante a otimização: {e}")
-    st.stop()
+# Simulação de Monte Carlo
+def simulate_portfolios(num_portfolios=10000):
+    results = []
+    for _ in range(num_portfolios):
+        pesos = np.random.dirichlet(np.ones(len(tickers)), size=1).flatten()
+        pesos = np.clip(pesos, limites_min, limites_max)
+        pesos /= pesos.sum()
 
-# Exibir resultados
-st.write("### Pesos Otimizados")
-df_pesos = pd.DataFrame(limpos.items(), columns=["Ativo", "Peso (%)"])
-df_pesos["Peso (%)"] *= 100
-st.dataframe(df_pesos.sort_values("Peso (%)", ascending=False).set_index("Ativo"))
+        retorno_esp = np.dot(pesos, mu)
+        risco = np.sqrt(np.dot(pesos.T, np.dot(S, pesos)))
+        sharpe = retorno_esp / risco
 
-st.markdown(f"""
-**Retorno esperado:** {ret:.2%}  
-**Volatilidade esperada:** {vol:.2%}  
-**Índice de Sharpe:** {sharpe:.2f}
-""")
+        results.append((sharpe, retorno_esp, risco, pesos))
 
-# Gráfico de alocação
-st.subheader("4. Gráfico de Alocação")
+    return sorted(results, key=lambda x: x[0], reverse=True)[0]  # Melhor Sharpe
+
+best_sharpe, best_return, best_risk, best_weights = simulate_portfolios()
+
+# Resultados
+st.subheader("Melhor Carteira - Índice de Sharpe Máximo")
+st.markdown(f"**Sharpe:** {best_sharpe:.2f} | **Retorno Esperado:** {best_return:.2%} | **Risco (Vol):** {best_risk:.2%}")
+
+result_df = pd.DataFrame({
+    'Ticker': tickers,
+    'Peso (%)': np.round(best_weights * 100, 2)
+})
+st.dataframe(result_df.set_index('Ticker'))
+
+# Gráfico de pizza
 fig, ax = plt.subplots()
-df_pesos.set_index("Ativo").sort_values("Peso (%)").plot(kind='barh', legend=False, ax=ax)
-plt.xlabel("Peso (%)")
-plt.tight_layout()
+ax.pie(best_weights, labels=tickers, autopct='%1.1f%%', startangle=90)
+ax.axis('equal')
 st.pyplot(fig)
-
