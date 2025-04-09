@@ -36,13 +36,16 @@ st.sidebar.dataframe(carteira_df.set_index("Ativo"))
 # Coleta de dados
 st.subheader("1. Coleta de dados históricos")
 with st.spinner("Baixando dados..."):
-    raw_data = yf.download(ativos, period=f"{anos}y")
+    raw_data = yf.download(ativos, period=f"{anos}y", group_by="ticker")
 
-    if isinstance(raw_data.columns, pd.MultiIndex):
+    try:
         dados = raw_data['Adj Close'].copy()
-        dados.columns.name = None
-    else:
-        dados = raw_data.copy()
+    except KeyError:
+        st.warning("'Adj Close' não disponível, usando 'Close' como fallback.")
+        dados = raw_data['Close'].copy()
+
+    if isinstance(dados.columns, pd.MultiIndex):
+        dados.columns = dados.columns.droplevel(0)
 
     dados = dados.dropna()
     st.success("Dados carregados com sucesso!")
