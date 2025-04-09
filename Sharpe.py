@@ -36,7 +36,10 @@ st.sidebar.dataframe(carteira_df.set_index("Ativo"))
 # Coleta de dados
 st.subheader("1. Coleta de dados históricos")
 with st.spinner("Baixando dados..."):
-    dados = yf.download(ativos, period=f"{anos}y")['Adj Close'].dropna()
+    dados = yf.download(ativos, period=f"{anos}y")["Adj Close"]
+    if isinstance(dados.columns, pd.MultiIndex):
+        dados = dados.droplevel(0, axis=1)
+    dados = dados.dropna()
     st.success("Dados carregados com sucesso!")
     st.line_chart(dados)
 
