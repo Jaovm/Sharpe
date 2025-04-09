@@ -1,88 +1,79 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import yfinance as yf
+from pypfopt import risk_models, expected_returns
 from sklearn.covariance import LedoitWolf
 
-# Título do app
-st.title("Otimização de Carteira - Melhor Sharpe com Monte Carlo")
+st.set_page_config(layout="wide")
+st.title("Otimização de Carteira com Monte Carlo - Melhor Índice de Sharpe")
 
-# Entradas do usuário
-st.header("Parâmetros da Carteira")
-anos = st.slider("Quantos anos de histórico?", min_value=1, max_value=10, value=7)
-
-st.subheader("Informações dos Ativos")
-ativos_df = st.data_editor(
-    pd.DataFrame({
-        "Ticker": ["AGRO3.SA", "BBAS3.SA", "BBSE3.SA", "BPAC11.SA", "EGIE3.SA", "ITUB3.SA", "PRIO3.SA", 
-                   "PSSA3.SA", "SAPR3.SA", "SBSP3.SA", "VIVT3.SA", "WEGE3.SA", "TOTS3.SA", "B3SA3.SA", "TAEE3.SA"],
-        "Peso Inicial (%)": [10, 1.2, 6.5, 10.6, 5, 0.5, 15, 15, 6.7, 4, 6.4, 15, 1, 0.1, 3],
-        "Min (%)": [0]*15,
-        "Max (%)": [30]*15
-    }),
-    num_rows="fixed",
+# Entrada de dados personalizados
+tickers_input = st.text_input(
+    "Digite os tickers separados por vírgula",
+    value="AGRO3.SA, BBAS3.SA, BBSE3.SA, BPAC11.SA, EGIE3.SA, ITUB3.SA, PRIO3.SA, PSSA3.SA, SAPR3.SA, SBSP3.SA, VIVT3.SA, WEGE3.SA, TOTS3.SA, B3SA3.SA, TAEE3.SA"
 )
+tickers = [ticker.strip().upper() for ticker in tickers_input.split(",") if ticker.strip()]
 
-# Processar entradas
-tickers = ativos_df["Ticker"].tolist()
-pesos_iniciais = np.array(ativos_df["Peso Inicial (%)"].tolist()) / 100
-pesos_min = np.array(ativos_df["Min (%)"].tolist()) / 100
-pesos_max = np.array(ativos_df["Max (%)"].tolist()) / 100
+st.subheader("Alocações por ativo")
+pesos_iniciais = {}
+min_aloc = {}
+max_aloc = {}
 
-# Baixar dados
-st.write("Baixando dados...")
-raw_data = yf.download(tickers, period=f"{anos}y", group_by="ticker", auto_adjust=True)
+for ticker in tickers:
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        pesos_iniciais[ticker] = st.number_input(f"Peso inicial {ticker} (%)", min_value=0.0, max_value=100.0, value=5.0, step=0.1)
+    with col2:
+        min_aloc[ticker] = st.number_input(f"Mínimo {ticker} (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.1)
+    with col3:
+        max_aloc[ticker] = st.number_input(f"Máximo {ticker} (%)", min_value=0.0, max_value=100.0, value=20.0, step=0.1)
 
-# Corrigir estrutura dos dados
-if isinstance(raw_data.columns, pd.MultiIndex):
-    dados = pd.DataFrame({ticker: raw_data[ticker]["Close"] for ticker in tickers})
-else:
-    dados = raw_data[["Close"]]
-    dados.columns = [tickers[0]]
+anos = st.slider("Anos de histórico", 1, 10, 7)
+num_simulacoes = st.slider("Número de simulações Monte Carlo", 10_000, 1_000_000, 50_000, step=10_000)
 
-dados = dados.dropna()
+if st.button("Rodar Otimização"):
+    raw_data = yf.download(tickers, period=f"{anos}y", progress=False)
 
-# Retornos
-retornos = dados.pct_change().dropna()
+    # Tenta obter "Adj Close" ou "Close"
+    try:
+        dados = raw_data['Adj Close'].dropna()
+    except KeyError:
+        dados = raw_data['Close'].dropna()
 
-# Matriz de covariância (Ledoit-Wolf)
-st.write("Calculando matriz de covariância...")
-cov_matrix = LedoitWolf().fit(retornos).covariance_
-media_retornos = retornos.mean()
+    # Cálculo de retornos e matriz de covariância com Ledoit-Wolf
+    retornos = expected_returns.mean_historical_return(dados)
+    matriz_cov = risk_models.CovarianceShrinkage(dados).ledoit_wolf()
 
-# Simulação de Monte Carlo
-st.write("Rodando simulação Monte Carlo...")
-num_simulacoes = 50_000
-resultados = []
-pesos_lista = []
+    # Simulação de Monte Carlo
+    num_ativos = len(tickers)
+    resultados = []
+    melhores_pesos = None
+    melhor_sharpe = -np.inf
 
-np.random.seed(42)
-for _ in range(num_simulacoes):
-    pesos = np.random.dirichlet(np.ones(len(tickers)), size=1).flatten()
+    for _ in range(num_simulacoes):
+        pesos = np.random.dirichlet(np.ones(num_ativos))
 
-    # Respeitar restrições
-    if np.all(pesos >= pesos_min) and np.all(pesos <= pesos_max):
-        retorno_esperado = np.dot(pesos, media_retornos) * 252
-        volatilidade = np.sqrt(np.dot(pesos.T, np.dot(cov_matrix * 252, pesos)))
+        # Respeita as restrições do usuário
+        if any(pesos[i]*100 < min_aloc[tickers[i]] or pesos[i]*100 > max_aloc[tickers[i]] for i in range(num_ativos)):
+            continue
+
+        retorno_esperado = np.dot(pesos, retornos.values)
+        volatilidade = np.sqrt(np.dot(pesos.T, np.dot(matriz_cov, pesos)))
         sharpe = retorno_esperado / volatilidade
-        resultados.append([retorno_esperado, volatilidade, sharpe])
-        pesos_lista.append(pesos)
 
-# Obter melhor resultado
-resultados = np.array(resultados)
-melhor_indice = np.argmax(resultados[:, 2])
-melhor_pesos = pesos_lista[melhor_indice]
-melhor_retorno, melhor_vol, melhor_sharpe = resultados[melhor_indice]
+        if sharpe > melhor_sharpe:
+            melhor_sharpe = sharpe
+            melhores_pesos = pesos
 
-# Resultado final
-st.subheader("Resultados")
-st.metric("Retorno Esperado (%)", f"{melhor_retorno*100:.2f}")
-st.metric("Volatilidade Anual (%)", f"{melhor_vol*100:.2f}")
-st.metric("Índice de Sharpe", f"{melhor_sharpe:.2f}")
+    if melhores_pesos is not None:
+        st.subheader("Melhor carteira encontrada")
+        df_resultado = pd.DataFrame({
+            "Ticker": tickers,
+            "Alocação (%)": (melhores_pesos * 100).round(2)
+        })
+        st.dataframe(df_resultado)
+        st.metric("Sharpe Ótimo", round(melhor_sharpe, 4))
+    else:
+        st.error("Nenhuma carteira viável foi encontrada dentro das restrições informadas. Tente ajustá-las.")
 
-st.subheader("Alocação Otimizada")
-df_resultado = pd.DataFrame({
-    "Ticker": tickers,
-    "Alocação Ideal (%)": melhor_pesos * 100
-})
-st.dataframe(df_resultado.style.format({"Alocação Ideal (%)": "{:.2f}"}))
