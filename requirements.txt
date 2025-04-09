@@ -1,9 +1,7 @@
-yfinance==0.2.37
-pandas==2.2.1
-numpy==1.26.4
-matplotlib==3.8.4
-seaborn==0.13.2
-PyPortfolioOpt==1.5.5
-scipy==1.13.0
-cvxpy==1.4.1
-ecos==2.0.12
+streamlit
+pandas
+numpy
+yfinance
+matplotlib
+PyPortfolioOpt
+scikit-learn
