@@ -3,7 +3,8 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from pypfopt import EfficientFrontier, expected_returns, risk_models
+from pypfopt import EfficientFrontier, expected_returns
+from pypfopt.risk_models import CovarianceShrinkage
 
 # Evita erro de estilo
 plt.style.use("ggplot")
@@ -42,7 +43,11 @@ with st.spinner("Baixando dados..."):
 # Retornos e covariância
 st.subheader("2. Cálculo de métricas")
 retornos_anuais = expected_returns.mean_historical_return(dados, frequency=252)
-matriz_cov = risk_models.sample_cov(dados, frequency=252)
+matriz_cov = CovarianceShrinkage(dados).ledoit_wolf()
+
+# Verificação de consistência
+assert not retornos_anuais.isnull().any(), "Retornos contêm NaNs"
+assert not matriz_cov.isnull().any().any(), "Covariância contém NaNs"
 
 # Sharpe da carteira atual
 peso_array = np.array(pesos_atuais)
