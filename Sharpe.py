@@ -1,101 +1,127 @@
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import yfinance as yf
-import streamlit as st
-from pypfopt.expected_returns import mean_historical_return
-from pypfopt.risk_models import CovarianceShrinkage
-from pypfopt.efficient_frontier import EfficientFrontier
-from pypfopt import DiscreteAllocation
-from datetime import datetime
+import matplotlib.pyplot as plt
+from pypfopt import expected_returns, risk_models
+from sklearn.covariance import LedoitWolf
+import warnings
 
-st.title("Otimização de Carteira - Markowitz com Monte Carlo")
+warnings.filterwarnings("ignore")
 
-# Ações pré-definidas
-acoes_default = {
-    "AGRO3.SA": {"peso": 10, "min": 5, "max": 15},
-    "BBAS3.SA": {"peso": 1.2, "min": 0, "max": 3},
-    "BBSE3.SA": {"peso": 6.5, "min": 4, "max": 10},
-    "BPAC11.SA": {"peso": 10.6, "min": 5, "max": 15},
-    "EGIE3.SA": {"peso": 5, "min": 4, "max": 8},
-    "ITUB3.SA": {"peso": 0.5, "min": 0, "max": 2},
-    "PRIO3.SA": {"peso": 15, "min": 10, "max": 20},
-    "PSSA3.SA": {"peso": 15, "min": 10, "max": 20},
-    "SAPR3.SA": {"peso": 6.7, "min": 4, "max": 10},
-    "SBSP3.SA": {"peso": 4, "min": 3, "max": 8},
-    "VIVT3.SA": {"peso": 6.4, "min": 4, "max": 10},
-    "WEGE3.SA": {"peso": 15, "min": 10, "max": 20},
-    "TOTS3.SA": {"peso": 1, "min": 0, "max": 3},
-    "B3SA3.SA": {"peso": 0.1, "min": 0, "max": 2},
-    "TAEE3.SA": {"peso": 3, "min": 2, "max": 5},
-}
+# Ações já informadas
+ativos_tabela = pd.DataFrame({
+    "Ticker": ["AGRO3.SA", "BBAS3.SA", "BBSE3.SA", "BPAC11.SA", "EGIE3.SA", "ITUB3.SA", "PRIO3.SA", "PSSA3.SA",
+               "SAPR3.SA", "SBSP3.SA", "VIVT3.SA", "WEGE3.SA", "TOTS3.SA", "B3SA3.SA", "TAEE3.SA"],
+    "Peso": [10, 1.2, 6.5, 10.6, 5, 0.5, 15, 15, 6.7, 4, 6.4, 15, 1, 0.1, 3],
+    "Min": [0]*15,
+    "Max": [1]*15
+})
 
-anos = st.slider("Período de Análise (anos)", 1, 10, 7)
+ativos_tabela["Peso"] = ativos_tabela["Peso"] / 100
 
-# Interface para edição dos ativos
-st.subheader("Parâmetros dos Ativos")
-tickers, pesos, bounds = [], [], []
-for acao, dados in acoes_default.items():
-    tickers.append(acao)
-    peso = st.number_input(f"Peso para {acao}", value=dados["peso"], key=f"peso_{acao}")
-    min_ = st.number_input(f"Mín. alocação (%) {acao}", value=dados["min"], key=f"min_{acao}")
-    max_ = st.number_input(f"Máx. alocação (%) {acao}", value=dados["max"], key=f"max_{acao}")
-    pesos.append(peso / 100)
-    bounds.append((min_ / 100, max_ / 100))
+# Permite adicionar mais ativos
+adicionar_mais = input("Deseja adicionar mais ativos? (s/n): ").lower()
+if adicionar_mais == 's':
+    while True:
+        ticker = input("Ticker (ex: PETR4.SA): ").upper()
+        peso = float(input("Peso desejado (%): ")) / 100
+        min_peso = float(input("Alocação mínima (%): ")) / 100
+        max_peso = float(input("Alocação máxima (%): ")) / 100
+        ativos_tabela = pd.concat([ativos_tabela, pd.DataFrame([{
+            "Ticker": ticker,
+            "Peso": peso,
+            "Min": min_peso,
+            "Max": max_peso
+        }])], ignore_index=True)
 
-st.write("---")
+        if input("Deseja adicionar outro? (s/n): ").lower() != 's':
+            break
 
+# Parâmetros
+tickers = ativos_tabela["Ticker"].tolist()
+anos = 7
+simulacoes = 1_000_000
+rf = 0.0  # taxa livre de risco
+
+# Coleta de dados com fallback robusto
+print("Baixando dados...")
+raw_data = yf.download(tickers, period=f"{anos}y", group_by='ticker', auto_adjust=False)
+
+# Tentativa de obter "Adj Close", fallback para "Close" se necessário
 try:
-    st.write("Baixando dados...")
-    dados = yf.download(tickers, period=f"{anos}y", progress=False)["Adj Close"]
-    dados = dados.dropna()
+    dados = raw_data["Adj Close"].dropna(how="all")
+except KeyError:
+    print("Coluna 'Adj Close' não encontrada. Usando 'Close'.")
+    if isinstance(raw_data.columns, pd.MultiIndex):
+        dados = pd.DataFrame({t: raw_data[t]["Close"] for t in tickers if "Close" in raw_data[t]}).dropna(how="all")
+    else:
+        dados = raw_data["Close"].dropna(how="all")
 
-    st.write("Calculando retornos esperados e covariância...")
-    retornos = mean_historical_return(dados)
-    cov_anual = CovarianceShrinkage(dados).ledoit_wolf()
+# Verificação final
+if dados.empty or dados.isnull().all().all():
+    raise ValueError("Erro ao calcular a matriz de covariância. Verifique os dados dos ativos.")
 
-    ef = EfficientFrontier(retornos, cov_anual, weight_bounds=(0, 1))
-    ef.add_objective(lambda w: 0)  # placeholder
+# Cálculos financeiros
+retornos = dados.pct_change().dropna()
+media_retornos = expected_returns.mean_historical_return(dados, frequency=252)
+cov_anual = risk_models.CovarianceShrinkage(retornos).ledoit_wolf()
 
-    # Carteira com melhor índice de Sharpe
-    w_sharpe = ef.max_sharpe()
-    ret_sharpe, vol_sharpe, sharpe_ratio = ef.portfolio_performance()
-    w_sharpe = ef.clean_weights()
+# Monte Carlo
+np.random.seed(42)
+resultados = []
+pesos_array = []
 
-    # Carteira com maior retorno
-    ef_return = EfficientFrontier(retornos, cov_anual, weight_bounds=(0, 1))
-    w_ret = ef_return.max_return()
-    ret_ret, vol_ret, sharpe_ret = ef_return.portfolio_performance()
-    w_ret = ef_return.clean_weights()
+for _ in range(simulacoes):
+    pesos = np.random.dirichlet(np.ones(len(tickers)))
+    if not all((pesos >= ativos_tabela["Min"].values) & (pesos <= ativos_tabela["Max"].values)):
+        continue
+    retorno_esp = np.dot(pesos, media_retornos)
+    volatilidade = np.sqrt(np.dot(pesos.T, np.dot(cov_anual, pesos)))
+    sharpe = (retorno_esp - rf) / volatilidade
+    resultados.append([retorno_esp, volatilidade, sharpe])
+    pesos_array.append(pesos)
 
-    # Carteira informada
-    pesos_informados = np.array(pesos)
-    pesos_informados /= pesos_informados.sum()
-    ret_inf = np.dot(pesos_informados, retornos)
-    vol_inf = np.sqrt(np.dot(pesos_informados.T, np.dot(cov_anual, pesos_informados)))
-    sharpe_inf = ret_inf / vol_inf
-    cagr_inf = (1 + ret_inf) ** anos - 1
-    cagr_sharpe = (1 + ret_sharpe) ** anos - 1
+resultados = np.array(resultados)
+pesos_array = np.array(pesos_array)
 
-    st.subheader("Resultados da Carteira com Melhor Sharpe")
-    st.write("Pesos:")
-    st.dataframe(pd.DataFrame.from_dict(w_sharpe, orient='index', columns=['Peso']).sort_values(by="Peso", ascending=False))
-    st.write(f"Retorno Esperado: {ret_sharpe*100:.2f}%")
-    st.write(f"Volatilidade Anual: {vol_sharpe*100:.2f}%")
-    st.write(f"Índice de Sharpe: {sharpe_ratio:.2f}")
-    st.write(f"CAGR Estimado: {cagr_sharpe*100:.2f}%")
+# Melhor Sharpe
+idx_max_sharpe = resultados[:, 2].argmax()
+melhor_pesos = pesos_array[idx_max_sharpe]
+melhor_retorno, melhor_vol, melhor_sharpe = resultados[idx_max_sharpe]
+melhor_cagr = (1 + melhor_retorno) ** anos - 1
 
-    st.subheader("Carteira com Maior Retorno Esperado")
-    st.write("Pesos:")
-    st.dataframe(pd.DataFrame.from_dict(w_ret, orient='index', columns=['Peso']).sort_values(by="Peso", ascending=False))
-    st.write(f"Retorno Esperado: {ret_ret*100:.2f}%")
-    st.write(f"Volatilidade Anual: {vol_ret*100:.2f}%")
-    st.write(f"Índice de Sharpe: {sharpe_ret:.2f}")
+# Maior retorno
+idx_max_retorno = resultados[:, 0].argmax()
+retorno_max, vol_max, sharpe_max = resultados[idx_max_retorno]
+cagr_max = (1 + retorno_max) ** anos - 1
 
-    st.subheader("Carteira Informada")
-    st.write(f"Retorno Esperado: {ret_inf*100:.2f}%")
-    st.write(f"Volatilidade Anual: {vol_inf*100:.2f}%")
-    st.write(f"Índice de Sharpe: {sharpe_inf:.2f}")
-    st.write(f"CAGR Estimado: {cagr_inf*100:.2f}%")
+# Carteira informada
+pesos_inf = ativos_tabela["Peso"].values
+retorno_inf = np.dot(pesos_inf, media_retornos)
+vol_inf = np.sqrt(np.dot(pesos_inf.T, np.dot(cov_anual, pesos_inf)))
+sharpe_inf = (retorno_inf - rf) / vol_inf
+cagr_inf = (1 + retorno_inf) ** anos - 1
 
-except Exception as e:
-    st.error(f"Erro ao calcular: {e}")
+# Exibir resultados
+print("\n--- Resultados ---")
+print(f"Carteira Informada:\n  Retorno Esperado: {retorno_inf*100:.2f}%\n  Volatilidade: {vol_inf*100:.2f}%\n  Sharpe: {sharpe_inf:.2f}\n  CAGR: {cagr_inf*100:.2f}%")
+
+print(f"\nMelhor Sharpe:\n  Retorno Esperado: {melhor_retorno*100:.2f}%\n  Volatilidade: {melhor_vol*100:.2f}%\n  Sharpe: {melhor_sharpe:.2f}\n  CAGR: {melhor_cagr*100:.2f}%")
+print(pd.DataFrame({"Ticker": tickers, "Peso (%)": (melhor_pesos * 100).round(2)}))
+
+print(f"\nMaior Retorno:\n  Retorno Esperado: {retorno_max*100:.2f}%\n  Volatilidade: {vol_max*100:.2f}%\n  Sharpe: {sharpe_max:.2f}\n  CAGR: {cagr_max*100:.2f}%")
+print(pd.DataFrame({"Ticker": tickers, "Peso (%)": (pesos_array[idx_max_retorno] * 100).round(2)}))
+
+# Plot opcional
+plt.figure(figsize=(10, 6))
+plt.scatter(resultados[:, 1], resultados[:, 0], c=resultados[:, 2], cmap="viridis", alpha=0.3)
+plt.colorbar(label="Sharpe Ratio")
+plt.xlabel("Volatilidade Anual")
+plt.ylabel("Retorno Esperado")
+plt.title("Fronteira Eficiente - Monte Carlo")
+plt.scatter([melhor_vol], [melhor_retorno], c="red", label="Melhor Sharpe", marker="*")
+plt.scatter([vol_inf], [retorno_inf], c="blue", label="Carteira Informada", marker="X")
+plt.scatter([vol_max], [retorno_max], c="green", label="Maior Retorno", marker="D")
+plt.legend()
+plt.tight_layout()
+plt.show()
