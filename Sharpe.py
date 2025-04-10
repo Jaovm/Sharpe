@@ -1,110 +1,124 @@
 import streamlit as st
-import pandas as pd
 import yfinance as yf
+import pandas as pd
 import numpy as np
-from pypfopt import expected_returns, risk_models
-import matplotlib.pyplot as plt
+from datetime import datetime
+from pypfopt import risk_models, expected_returns
+from sklearn.covariance import LedoitWolf
 
-st.set_page_config(page_title="Otimização de Carteira", layout="wide")
-st.title("Otimização de Carteira - Fronteira Eficiente com Monte Carlo")
+# Ações e alocações informadas
+acoes = {
+    'AGRO3.SA': 10,
+    'BBAS3.SA': 1.2,
+    'BBSE3.SA': 6.5,
+    'BPAC11.SA': 10.6,
+    'EGIE3.SA': 5,
+    'ITUB3.SA': 0.5,
+    'PRIO3.SA': 15,
+    'PSSA3.SA': 15,
+    'SAPR3.SA': 6.7,
+    'SBSP3.SA': 4,
+    'VIVT3.SA': 6.4,
+    'WEGE3.SA': 15,
+    'TOTS3.SA': 1,
+    'B3SA3.SA': 0.1,
+    'TAEE3.SA': 3
+}
 
-anos = st.slider("Anos de histórico", 1, 10, 7)
+# Parâmetros
+anos = 7
+simulacoes = 1_000_000
+tickers = list(acoes.keys())
+pesos_informados = np.array(list(acoes.values())) / 100
 
-st.markdown("### Tabela de Ativos")
-df_input = st.data_editor(
-    pd.DataFrame(columns=["Ticker", "Peso", "Min", "Max"]),
-    use_container_width=True,
-    num_rows="dynamic"
-)
+# Coleta de dados
+raw_data = yf.download(tickers, period=f"{anos}y", auto_adjust=True)["Close"]
+raw_data = raw_data.dropna()
+retornos = raw_data.pct_change().dropna()
 
-df_input.dropna(inplace=True)
-df_input.reset_index(drop=True, inplace=True)
+# Cálculo estatístico
+media_anual = expected_returns.mean_historical_return(raw_data, frequency=252)
+cov_anual = risk_models.CovarianceShrinkage(retornos).ledoit_wolf()
 
-if df_input.empty:
-    st.warning("Adicione ao menos um ativo.")
-    st.stop()
+# Funções
+def simular_monte_carlo(n_sim, retornos_esperados, covariancia, min_bounds, max_bounds):
+    num_ativos = len(retornos_esperados)
+    resultados = {
+        'Retorno': [],
+        'Volatilidade': [],
+        'Sharpe': [],
+        'Pesos': []
+    }
 
-tickers = df_input["Ticker"].tolist()
-pesos_informados = df_input["Peso"].values / 100
-limites_min = df_input["Min"].values / 100
-limites_max = df_input["Max"].values / 100
+    for _ in range(n_sim):
+        pesos = np.random.dirichlet(np.ones(num_ativos), 1).flatten()
+        if np.all(pesos >= min_bounds) and np.all(pesos <= max_bounds):
+            ret_esp = np.dot(pesos, retornos_esperados)
+            vol = np.sqrt(np.dot(pesos.T, np.dot(covariancia, pesos)))
+            sharpe = ret_esp / vol if vol > 0 else 0
+            resultados['Retorno'].append(ret_esp)
+            resultados['Volatilidade'].append(vol)
+            resultados['Sharpe'].append(sharpe)
+            resultados['Pesos'].append(pesos)
+    return resultados
 
-# Baixar dados e tratar
-raw = yf.download(tickers, period=f"{anos}y", group_by='ticker', auto_adjust=True, progress=False)
+# Limites de alocação
+min_bounds = np.zeros(len(tickers))
+max_bounds = np.ones(len(tickers))
 
-dados = pd.DataFrame()
-for ticker in tickers:
-    try:
-        dados[ticker] = raw[ticker]['Close']
-    except Exception as e:
-        st.error(f"Erro ao processar {ticker}: {e}")
-        st.stop()
+# Simulações
+resultados = simular_monte_carlo(simulacoes, media_anual.values, cov_anual.values, min_bounds, max_bounds)
+df_resultados = pd.DataFrame(resultados)
 
-dados.dropna(inplace=True)
+# Carteiras ótimas
+idx_sharpe = df_resultados['Sharpe'].idxmax()
+idx_retorno = df_resultados['Retorno'].idxmax()
 
-# Retornos esperados e covariância
-mu = expected_returns.mean_historical_return(dados)
-S = risk_models.CovarianceShrinkage(dados).ledoit_wolf()
+pesos_sharpe = df_resultados.loc[idx_sharpe, 'Pesos']
+pesos_retorno = df_resultados.loc[idx_retorno, 'Pesos']
 
-# Simulações Monte Carlo
-num_simulacoes = 1_000_000
-resultados = []
-pesos_simulados = []
+# Função de métricas
+def calcular_metricas(pesos, retornos_esperados, cov):
+    retorno = np.dot(pesos, retornos_esperados)
+    volatilidade = np.sqrt(np.dot(pesos.T, np.dot(cov, pesos)))
+    sharpe = retorno / volatilidade if volatilidade > 0 else 0
+    cagr = (1 + retorno) ** anos - 1
+    return retorno * 100, volatilidade * 100, sharpe, cagr * 100
 
-for _ in range(num_simulacoes):
-    pesos = np.random.dirichlet(np.ones(len(tickers)))
-    if np.all(pesos >= limites_min) and np.all(pesos <= limites_max):
-        retorno_esperado = np.dot(pesos, mu)
-        volatilidade = np.sqrt(np.dot(pesos.T, np.dot(S, pesos)))
-        sharpe = retorno_esperado / volatilidade
-        resultados.append([pesos, retorno_esperado, volatilidade, sharpe])
-        pesos_simulados.append(pesos)
+# Resultados
+ret_inf, vol_inf, sharpe_inf, cagr_inf = calcular_metricas(pesos_informados, media_anual.values, cov_anual.values)
+ret_sh, vol_sh, sharpe_sh, cagr_sh = calcular_metricas(pesos_sharpe, media_anual.values, cov_anual.values)
+ret_ret, vol_ret, sharpe_ret, cagr_ret = calcular_metricas(pesos_retorno, media_anual.values, cov_anual.values)
 
-# Ordenar
-simulacoes = sorted(resultados, key=lambda x: x[3], reverse=True)
-carteira_sharpe = simulacoes[0]
-carteira_retorno = max(simulacoes, key=lambda x: x[1])
+# Streamlit
+st.title("Otimização de Carteira - Ações Brasileiras")
 
-def desempenho(pesos):
-    ret = np.dot(pesos, mu)
-    vol = np.sqrt(np.dot(pesos.T, np.dot(S, pesos)))
-    sharpe = ret / vol
-    cagr = (1 + ret) ** (1 / anos) - 1
-    return ret, vol, sharpe, cagr
+st.subheader("Carteira Informada")
+st.dataframe(pd.DataFrame({
+    'Ticker': tickers,
+    'Alocação (%)': (pesos_informados * 100).round(2)
+}))
+st.markdown(f"**Retorno Esperado:** {ret_inf:.2f}%  \n"
+            f"**Volatilidade Anual:** {vol_inf:.2f}%  \n"
+            f"**Sharpe:** {sharpe_inf:.2f}  \n"
+            f"**CAGR:** {cagr_inf:.2f}%")
 
-def mostrar_resultados(nome, pesos):
-    ret, vol, sharpe, cagr = desempenho(pesos)
-    st.subheader(f"Resultados - {nome}")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Retorno Esperado (%)", f"{ret*100:.2f}")
-    col2.metric("Volatilidade Anual (%)", f"{vol*100:.2f}")
-    col3.metric("Índice de Sharpe", f"{sharpe:.2f}")
-    col4.metric("CAGR (%)", f"{cagr*100:.2f}")
-    st.dataframe(pd.DataFrame({
-        "Ticker": tickers,
-        "Alocação (%)": np.round(pesos * 100, 2)
-    }), use_container_width=True)
+st.subheader("Carteira com Maior Sharpe")
+st.dataframe(pd.DataFrame({
+    'Ticker': tickers,
+    'Alocação (%)': (pesos_sharpe * 100).round(2)
+}))
+st.markdown(f"**Retorno Esperado:** {ret_sh:.2f}%  \n"
+            f"**Volatilidade Anual:** {vol_sh:.2f}%  \n"
+            f"**Sharpe:** {sharpe_sh:.2f}  \n"
+            f"**CAGR:** {cagr_sh:.2f}%")
 
-# Exibir resultados
-mostrar_resultados("Carteira Informada", pesos_informados)
-mostrar_resultados("Carteira de Maior Sharpe", carteira_sharpe[0])
-mostrar_resultados("Carteira de Maior Retorno", carteira_retorno[0])
-
-# Gráfico da Fronteira Eficiente
-sim_retornos = [x[1] * 100 for x in simulacoes]
-sim_vols = [x[2] * 100 for x in simulacoes]
-
-ret_inf, vol_inf, _sh, _cg = desempenho(pesos_informados)
-ret_sharpe, vol_sharpe, _sh, _cg = desempenho(carteira_sharpe[0])
-ret_max, vol_max, _sh, _cg = desempenho(carteira_retorno[0])
-
-fig, ax = plt.subplots(figsize=(10, 6))
-ax.scatter(sim_vols, sim_retornos, c='lightblue', alpha=0.4, label='Carteiras Simuladas')
-ax.scatter(vol_inf * 100, ret_inf * 100, color='gray', marker='X', s=100, label='Informada')
-ax.scatter(vol_sharpe * 100, ret_sharpe * 100, color='green', marker='*', s=150, label='Maior Sharpe')
-ax.scatter(vol_max * 100, ret_max * 100, color='orange', marker='D', s=100, label='Maior Retorno')
-ax.set_title("Fronteira Eficiente - Simulação de Monte Carlo")
-ax.set_xlabel("Volatilidade Anual (%)")
-ax.set_ylabel("Retorno Esperado (%)")
-ax.legend()
-st.pyplot(fig)
+st.subheader("Carteira com Maior Retorno Esperado")
+st.dataframe(pd.DataFrame({
+    'Ticker': tickers,
+    'Alocação (%)': (pesos_retorno * 100).round(2)
+}))
+st.markdown(f"**Retorno Esperado:** {ret_ret:.2f}%  \n"
+            f"**Volatilidade Anual:** {vol_ret:.2f}%  \n"
+            f"**Sharpe:** {sharpe_ret:.2f}  \n"
+            f"**CAGR:** {cagr_ret:.2f}%")
