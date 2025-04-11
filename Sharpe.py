@@ -40,7 +40,7 @@ if adicionar_mais == 's':
 # Parâmetros
 tickers = ativos_tabela["Ticker"].tolist()
 anos = 7
-simulacoes = 1_000_000
+simulacoes = 500_000
 rf = 0.0  # taxa livre de risco
 
 # Coleta de dados com fallback robusto
