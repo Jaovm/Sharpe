@@ -60,7 +60,7 @@ def calcular_retorno_cov(dados):
     cov_matrix = LedoitWolf().fit(retornos).covariance_ * 252
     return retorno_medio, cov_matrix
 
-def simular_carteiras(retorno_medio, cov_matrix, num_portfolios=150000, rf=0.0):
+def simular_carteiras(retorno_medio, cov_matrix, num_portfolios=300000, rf=0.0):
     n = len(retorno_medio)
     ativos = list(retorno_medio.index)
     limites = [st.session_state.limites_dict.get(tic, (min_aloc_padrao, max_aloc_padrao)) for tic in ativos]
