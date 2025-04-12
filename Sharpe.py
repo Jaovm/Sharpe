@@ -1,127 +1,153 @@
 import yfinance as yf
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from pypfopt import expected_returns, risk_models
+import seaborn as sns
 from sklearn.covariance import LedoitWolf
-import warnings
+import streamlit as st
 
-warnings.filterwarnings("ignore")
+st.set_page_config(layout="wide")
 
-# Ações já informadas
-ativos_tabela = pd.DataFrame({
-    "Ticker": ["AGRO3.SA", "BBAS3.SA", "BBSE3.SA", "BPAC11.SA", "EGIE3.SA", "ITUB3.SA", "PRIO3.SA", "PSSA3.SA",
-               "SAPR3.SA", "SBSP3.SA", "VIVT3.SA", "WEGE3.SA", "TOTS3.SA", "B3SA3.SA", "TAEE3.SA"],
-    "Peso": [10, 1.2, 6.5, 10.6, 5, 0.5, 15, 15, 6.7, 4, 6.4, 15, 1, 0.1, 3],
-    "Min": [0]*15,
-    "Max": [1]*15
-})
+# Configurações iniciais
+start_date = '2017-01-01'
+end_date = pd.Timestamp.today().strftime('%Y-%m-%d')
 
-ativos_tabela["Peso"] = ativos_tabela["Peso"] / 100
+if 'tickers_dict' not in st.session_state:
+    st.session_state.tickers_dict = {
+        'AGRO3.SA': 0.10, 'BBAS3.SA': 0.012, 'BBSE3.SA': 0.065, 'BPAC11.SA': 0.106,
+        'EGIE3.SA': 0.05, 'ITUB3.SA': 0.005, 'PRIO3.SA': 0.15, 'PSSA3.SA': 0.15,
+        'SAPR3.SA': 0.067, 'SBSP3.SA': 0.04, 'VIVT3.SA': 0.064, 'WEGE3.SA': 0.15,
+        'TOTS3.SA': 0.01, 'B3SA3.SA': 0.001, 'TAEE3.SA': 0.03
+    }
 
-# Permite adicionar mais ativos
-adicionar_mais = input("Deseja adicionar mais ativos? (s/n): ").lower()
-if adicionar_mais == 's':
-    while True:
-        ticker = input("Ticker (ex: PETR4.SA): ").upper()
-        peso = float(input("Peso desejado (%): ")) / 100
-        min_peso = float(input("Alocação mínima (%): ")) / 100
-        max_peso = float(input("Alocação máxima (%): ")) / 100
-        ativos_tabela = pd.concat([ativos_tabela, pd.DataFrame([{
-            "Ticker": ticker,
-            "Peso": peso,
-            "Min": min_peso,
-            "Max": max_peso
-        }])], ignore_index=True)
+st.sidebar.header("Gerenciar Tickers")
+novo_ticker = st.sidebar.text_input("Novo ticker (ex: PETR4.SA)")
+peso_ticker = st.sidebar.number_input("Peso (%)", min_value=0.0, max_value=1.0, step=0.01)
+if st.sidebar.button("Adicionar ticker") and novo_ticker:
+    st.session_state.tickers_dict[novo_ticker.upper()] = peso_ticker
 
-        if input("Deseja adicionar outro? (s/n): ").lower() != 's':
-            break
+remover_ticker = st.sidebar.selectbox("Remover ticker", [""] + list(st.session_state.tickers_dict.keys()))
+if st.sidebar.button("Remover") and remover_ticker:
+    st.session_state.tickers_dict.pop(remover_ticker, None)
 
-# Parâmetros
-tickers = ativos_tabela["Ticker"].tolist()
-anos = 7
-simulacoes = 500_000
-rf = 0.0  # taxa livre de risco
+min_aloc = st.sidebar.slider("Alocação mínima por ativo (%)", 0.0, 0.1, 0.0, 0.01)
+max_aloc = st.sidebar.slider("Alocação máxima por ativo (%)", 0.1, 1.0, 0.3, 0.01)
 
-# Coleta de dados com fallback robusto
-print("Baixando dados...")
-raw_data = yf.download(tickers, period=f"{anos}y", group_by='ticker', auto_adjust=False)
+@st.cache_data(show_spinner=False)
+def baixar_dados(tickers, start, end):
+    try:
+        df = yf.download(tickers, start=start, end=end, group_by='ticker', auto_adjust=True)
+        df = df.stack(level=0).rename_axis(index=['Date', 'Ticker']).reset_index()
+        df = df.pivot(index='Date', columns='Ticker', values='Close')
+        return df.dropna(axis=1, how='any')
+    except Exception as e:
+        st.error(f"Erro ao carregar os dados: {e}")
+        return pd.DataFrame()
 
-# Tentativa de obter "Adj Close", fallback para "Close" se necessário
-try:
-    dados = raw_data["Adj Close"].dropna(how="all")
-except KeyError:
-    print("Coluna 'Adj Close' não encontrada. Usando 'Close'.")
-    if isinstance(raw_data.columns, pd.MultiIndex):
-        dados = pd.DataFrame({t: raw_data[t]["Close"] for t in tickers if "Close" in raw_data[t]}).dropna(how="all")
+def calcular_retorno_cov(dados):
+    retornos = dados.pct_change().dropna()
+    retorno_medio = retornos.mean() * 252
+    cov_matrix = LedoitWolf().fit(retornos).covariance_ * 252
+    return retorno_medio, cov_matrix
+
+def simular_carteiras(retorno_medio, cov_matrix, num_portfolios=100000, rf=0.0):
+    n = len(retorno_medio)
+    resultados = []
+    pesos_lista = []
+    for _ in range(num_portfolios):
+        while True:
+            pesos = np.random.dirichlet(np.ones(n), size=1)[0]
+            if all(min_aloc <= w <= max_aloc for w in pesos):
+                break
+        retorno = np.dot(pesos, retorno_medio)
+        risco = np.sqrt(np.dot(pesos.T, np.dot(cov_matrix, pesos)))
+        sharpe = (retorno - rf) / risco if risco != 0 else 0
+        resultados.append([retorno, risco, sharpe])
+        pesos_lista.append(pesos)
+
+    resultados = np.array(resultados)
+    melhor_idx = np.argmax(resultados[:, 2])
+    maior_ret_idx = np.argmax(resultados[:, 0])
+
+    melhor_sharpe = {
+        'retorno': resultados[melhor_idx, 0],
+        'risco': resultados[melhor_idx, 1],
+        'sharpe': resultados[melhor_idx, 2],
+        'pesos': pesos_lista[melhor_idx]
+    }
+
+    maior_retorno = {
+        'retorno': resultados[maior_ret_idx, 0],
+        'risco': resultados[maior_ret_idx, 1],
+        'sharpe': resultados[maior_ret_idx, 2],
+        'pesos': pesos_lista[maior_ret_idx]
+    }
+
+    return resultados, pesos_lista, melhor_sharpe, maior_retorno
+
+def plotar_grafico(resultados):
+    plt.figure(figsize=(12, 6))
+    plt.scatter(resultados[:, 1], resultados[:, 0], c=resultados[:, 2], cmap='viridis', s=3)
+    plt.xlabel('Risco (Volatilidade)')
+    plt.ylabel('Retorno Esperado')
+    plt.title('Fronteira Eficiente - Simulação de Monte Carlo')
+    st.pyplot(plt.gcf())
+
+def sugerir_ativos_por_cenario():
+    st.sidebar.subheader("Cenário Macroeconômico")
+    cenarios = {
+        "Alta de Juros": ["Bancos", "Seguradoras", "Tesouro Direto"],
+        "Inflação em Alta": ["Setor de energia", "Commodities"],
+        "PIB em Crescimento": ["Varejo", "Construção Civil", "Tecnologia"],
+        "Recessão": ["Utilities", "Alimentos", "Saúde"],
+        "Dólar em Alta": ["Exportadoras", "Mineração", "Petróleo"]
+    }
+    cenario = st.sidebar.selectbox("Selecione um cenário macroeconômico", [""] + list(cenarios.keys()))
+    if cenario:
+        st.sidebar.info(f"Setores/ativos que tendem a se beneficiar: {', '.join(cenarios[cenario])}")
+
+def exibir_resultados(dados, pesos_informados):
+    retorno_medio, cov_matrix = calcular_retorno_cov(dados)
+    ativos_validos = dados.columns.intersection(pesos_informados.keys())
+    if len(ativos_validos) == 0:
+        st.error("Nenhum ativo com dados válidos para análise.")
+        return
+
+    retorno_medio = retorno_medio[ativos_validos]
+    cov_matrix_df = pd.DataFrame(cov_matrix, index=dados.columns, columns=dados.columns)
+    cov_matrix = cov_matrix_df.loc[ativos_validos, ativos_validos].values
+    pesos_informados_arr = np.array([pesos_informados[tic] for tic in ativos_validos])
+    pesos_informados_arr /= pesos_informados_arr.sum()
+
+    ret_informado = np.dot(pesos_informados_arr, retorno_medio)
+    risco_informado = np.sqrt(np.dot(pesos_informados_arr.T, np.dot(cov_matrix, pesos_informados_arr)))
+
+    st.subheader("Carteira Informada")
+    st.write(f"Retorno esperado anualizado: {ret_informado:.2%}")
+    st.write(f"Volatilidade anualizada: {risco_informado:.2%}")
+
+    resultados, pesos, melhor_sharpe, maior_retorno = simular_carteiras(retorno_medio, cov_matrix)
+
+    st.subheader("Carteira com Melhor Índice de Sharpe")
+    st.write(f"Retorno: {melhor_sharpe['retorno']:.2%}")
+    st.write(f"Risco: {melhor_sharpe['risco']:.2%}")
+    st.write(f"Sharpe: {melhor_sharpe['sharpe']:.2f}")
+    st.dataframe(pd.DataFrame({'Ticker': ativos_validos, 'Peso': melhor_sharpe['pesos']}))
+
+    st.subheader("Carteira com Maior Retorno Esperado")
+    st.write(f"Retorno: {maior_retorno['retorno']:.2%}")
+    st.write(f"Risco: {maior_retorno['risco']:.2%}")
+    st.write(f"Sharpe: {maior_retorno['sharpe']:.2f}")
+    st.dataframe(pd.DataFrame({'Ticker': ativos_validos, 'Peso': maior_retorno['pesos']}))
+
+    plotar_grafico(resultados)
+
+def rodar_analise(tickers_dict, start, end):
+    dados = baixar_dados(list(tickers_dict.keys()), start, end)
+    if not dados.empty:
+        exibir_resultados(dados, tickers_dict)
     else:
-        dados = raw_data["Close"].dropna(how="all")
+        st.error("Erro ao carregar os dados. Verifique os tickers ou a conexão.")
 
-# Verificação final
-if dados.empty or dados.isnull().all().all():
-    raise ValueError("Erro ao calcular a matriz de covariância. Verifique os dados dos ativos.")
-
-# Cálculos financeiros
-retornos = dados.pct_change().dropna()
-media_retornos = expected_returns.mean_historical_return(dados, frequency=252)
-cov_anual = risk_models.CovarianceShrinkage(retornos).ledoit_wolf()
-
-# Monte Carlo
-np.random.seed(42)
-resultados = []
-pesos_array = []
-
-for _ in range(simulacoes):
-    pesos = np.random.dirichlet(np.ones(len(tickers)))
-    if not all((pesos >= ativos_tabela["Min"].values) & (pesos <= ativos_tabela["Max"].values)):
-        continue
-    retorno_esp = np.dot(pesos, media_retornos)
-    volatilidade = np.sqrt(np.dot(pesos.T, np.dot(cov_anual, pesos)))
-    sharpe = (retorno_esp - rf) / volatilidade
-    resultados.append([retorno_esp, volatilidade, sharpe])
-    pesos_array.append(pesos)
-
-resultados = np.array(resultados)
-pesos_array = np.array(pesos_array)
-
-# Melhor Sharpe
-idx_max_sharpe = resultados[:, 2].argmax()
-melhor_pesos = pesos_array[idx_max_sharpe]
-melhor_retorno, melhor_vol, melhor_sharpe = resultados[idx_max_sharpe]
-melhor_cagr = (1 + melhor_retorno) ** anos - 1
-
-# Maior retorno
-idx_max_retorno = resultados[:, 0].argmax()
-retorno_max, vol_max, sharpe_max = resultados[idx_max_retorno]
-cagr_max = (1 + retorno_max) ** anos - 1
-
-# Carteira informada
-pesos_inf = ativos_tabela["Peso"].values
-retorno_inf = np.dot(pesos_inf, media_retornos)
-vol_inf = np.sqrt(np.dot(pesos_inf.T, np.dot(cov_anual, pesos_inf)))
-sharpe_inf = (retorno_inf - rf) / vol_inf
-cagr_inf = (1 + retorno_inf) ** anos - 1
-
-# Exibir resultados
-print("\n--- Resultados ---")
-print(f"Carteira Informada:\n  Retorno Esperado: {retorno_inf*100:.2f}%\n  Volatilidade: {vol_inf*100:.2f}%\n  Sharpe: {sharpe_inf:.2f}\n  CAGR: {cagr_inf*100:.2f}%")
-
-print(f"\nMelhor Sharpe:\n  Retorno Esperado: {melhor_retorno*100:.2f}%\n  Volatilidade: {melhor_vol*100:.2f}%\n  Sharpe: {melhor_sharpe:.2f}\n  CAGR: {melhor_cagr*100:.2f}%")
-print(pd.DataFrame({"Ticker": tickers, "Peso (%)": (melhor_pesos * 100).round(2)}))
-
-print(f"\nMaior Retorno:\n  Retorno Esperado: {retorno_max*100:.2f}%\n  Volatilidade: {vol_max*100:.2f}%\n  Sharpe: {sharpe_max:.2f}\n  CAGR: {cagr_max*100:.2f}%")
-print(pd.DataFrame({"Ticker": tickers, "Peso (%)": (pesos_array[idx_max_retorno] * 100).round(2)}))
-
-# Plot opcional
-plt.figure(figsize=(10, 6))
-plt.scatter(resultados[:, 1], resultados[:, 0], c=resultados[:, 2], cmap="viridis", alpha=0.3)
-plt.colorbar(label="Sharpe Ratio")
-plt.xlabel("Volatilidade Anual")
-plt.ylabel("Retorno Esperado")
-plt.title("Fronteira Eficiente - Monte Carlo")
-plt.scatter([melhor_vol], [melhor_retorno], c="red", label="Melhor Sharpe", marker="*")
-plt.scatter([vol_inf], [retorno_inf], c="blue", label="Carteira Informada", marker="X")
-plt.scatter([vol_max], [retorno_max], c="green", label="Maior Retorno", marker="D")
-plt.legend()
-plt.tight_layout()
-plt.show()
+sugerir_ativos_por_cenario()
+rodar_analise(st.session_state.tickers_dict, start_date, end_date)
