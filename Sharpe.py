@@ -8,7 +8,6 @@ import streamlit as st
 
 st.set_page_config(layout="wide")
 
-# Configurações iniciais
 start_date = '2017-04-04'
 end_date = pd.Timestamp.today().strftime('%Y-%m-%d')
 
@@ -20,6 +19,9 @@ if 'tickers_dict' not in st.session_state:
         'TOTS3.SA': 0.01, 'B3SA3.SA': 0.001, 'TAEE3.SA': 0.03
     }
 
+if 'limites_dict' not in st.session_state:
+    st.session_state.limites_dict = {}
+
 st.sidebar.header("Gerenciar Tickers")
 novo_ticker = st.sidebar.text_input("Novo ticker (ex: PETR4.SA)")
 peso_ticker = st.sidebar.number_input("Peso (%)", min_value=0.0, max_value=1.0, step=0.01)
@@ -29,9 +31,17 @@ if st.sidebar.button("Adicionar ticker") and novo_ticker:
 remover_ticker = st.sidebar.selectbox("Remover ticker", [""] + list(st.session_state.tickers_dict.keys()))
 if st.sidebar.button("Remover") and remover_ticker:
     st.session_state.tickers_dict.pop(remover_ticker, None)
+    st.session_state.limites_dict.pop(remover_ticker, None)
 
-min_aloc = st.sidebar.slider("Alocação mínima por ativo (%)", 0.0, 0.1, 0.0, 0.01)
-max_aloc = st.sidebar.slider("Alocação máxima por ativo (%)", 0.1, 1.0, 0.3, 0.01)
+st.sidebar.header("Limites de Alocação")
+min_aloc_padrao = st.sidebar.slider("Alocação mínima padrão (%)", 0.0, 0.1, 0.0, 0.01)
+max_aloc_padrao = st.sidebar.slider("Alocação máxima padrão (%)", 0.1, 1.0, 0.3, 0.01)
+
+for ticker in st.session_state.tickers_dict.keys():
+    with st.sidebar.expander(f"Limites de {ticker}", expanded=False):
+        min_val = st.number_input(f"Mínimo {ticker}", value=st.session_state.limites_dict.get(ticker, (min_aloc_padrao, max_aloc_padrao))[0], min_value=0.0, max_value=1.0, step=0.01, key=f"min_{ticker}")
+        max_val = st.number_input(f"Máximo {ticker}", value=st.session_state.limites_dict.get(ticker, (min_aloc_padrao, max_aloc_padrao))[1], min_value=0.0, max_value=1.0, step=0.01, key=f"max_{ticker}")
+        st.session_state.limites_dict[ticker] = (min_val, max_val)
 
 @st.cache_data(show_spinner=False)
 def baixar_dados(tickers, start, end):
@@ -52,13 +62,21 @@ def calcular_retorno_cov(dados):
 
 def simular_carteiras(retorno_medio, cov_matrix, num_portfolios=200000, rf=0.0):
     n = len(retorno_medio)
+    ativos = list(retorno_medio.index)
+    limites = [st.session_state.limites_dict.get(tic, (min_aloc_padrao, max_aloc_padrao)) for tic in ativos]
+
     resultados = []
     pesos_lista = []
     for _ in range(num_portfolios):
+        tentativas = 0
         while True:
             pesos = np.random.dirichlet(np.ones(n), size=1)[0]
-            if all(min_aloc <= w <= max_aloc for w in pesos):
+            if all(lim[0] <= p <= lim[1] for p, lim in zip(pesos, limites)):
                 break
+            tentativas += 1
+            if tentativas > 500:
+                return np.array([]), [], {}, {}
+
         retorno = np.dot(pesos, retorno_medio)
         risco = np.sqrt(np.dot(pesos.T, np.dot(cov_matrix, pesos)))
         sharpe = (retorno - rf) / risco if risco != 0 else 0
@@ -128,17 +146,21 @@ def exibir_resultados(dados, pesos_informados):
 
     resultados, pesos, melhor_sharpe, maior_retorno = simular_carteiras(retorno_medio, cov_matrix)
 
+    if resultados.size == 0:
+        st.warning("Não foi possível gerar carteiras válidas com os limites definidos.")
+        return
+
     st.subheader("Carteira com Melhor Índice de Sharpe")
     st.write(f"Retorno: {melhor_sharpe['retorno']:.2%}")
     st.write(f"Risco: {melhor_sharpe['risco']:.2%}")
     st.write(f"Sharpe: {melhor_sharpe['sharpe']:.2f}")
-    st.dataframe(pd.DataFrame({'Ticker': ativos_validos, 'Peso': melhor_sharpe['pesos']}))
+    st.dataframe(pd.DataFrame({'Ticker': ativos_validos, 'Peso': melhor_sharpe['pesos']}).set_index('Ticker'))
 
     st.subheader("Carteira com Maior Retorno Esperado")
     st.write(f"Retorno: {maior_retorno['retorno']:.2%}")
     st.write(f"Risco: {maior_retorno['risco']:.2%}")
     st.write(f"Sharpe: {maior_retorno['sharpe']:.2f}")
-    st.dataframe(pd.DataFrame({'Ticker': ativos_validos, 'Peso': maior_retorno['pesos']}))
+    st.dataframe(pd.DataFrame({'Ticker': ativos_validos, 'Peso': maior_retorno['pesos']}).set_index('Ticker'))
 
     plotar_grafico(resultados)
 
