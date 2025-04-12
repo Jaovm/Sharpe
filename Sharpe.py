@@ -9,7 +9,7 @@ import streamlit as st
 st.set_page_config(layout="wide")
 
 # Configurações iniciais
-start_date = '2017-04-01'
+start_date = '2017-04-04'
 end_date = pd.Timestamp.today().strftime('%Y-%m-%d')
 
 if 'tickers_dict' not in st.session_state:
