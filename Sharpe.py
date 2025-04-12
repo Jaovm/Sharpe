@@ -35,7 +35,7 @@ if st.sidebar.button("Remover") and remover_ticker:
 
 st.sidebar.header("Limites de Alocação")
 min_aloc_padrao = st.sidebar.slider("Alocação mínima padrão (%)", 0.0, 0.1, 0.0, 0.01)
-max_aloc_padrao = st.sidebar.slider("Alocação máxima padrão (%)", 0.1, 1.0, 0.15, 0.01)
+max_aloc_padrao = st.sidebar.slider("Alocação máxima padrão (%)", 0.1, 1.0, 0.16, 0.01)
 
 for ticker in st.session_state.tickers_dict.keys():
     with st.sidebar.expander(f"Limites de {ticker}", expanded=False):
@@ -60,7 +60,7 @@ def calcular_retorno_cov(dados):
     cov_matrix = LedoitWolf().fit(retornos).covariance_ * 252
     return retorno_medio, cov_matrix
 
-def simular_carteiras(retorno_medio, cov_matrix, num_portfolios=10000, rf=0.0):
+def simular_carteiras(retorno_medio, cov_matrix, num_portfolios=150000, rf=0.0):
     n = len(retorno_medio)
     ativos = list(retorno_medio.index)
     limites = [st.session_state.limites_dict.get(tic, (min_aloc_padrao, max_aloc_padrao)) for tic in ativos]
