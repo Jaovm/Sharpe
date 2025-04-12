@@ -1,7 +1,6 @@
-streamlit
-pandas
-numpy
 yfinance
+numpy
+pandas
 matplotlib
-PyPortfolioOpt
+seaborn
 scikit-learn
