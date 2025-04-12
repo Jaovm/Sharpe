@@ -50,7 +50,7 @@ def calcular_retorno_cov(dados):
     cov_matrix = LedoitWolf().fit(retornos).covariance_ * 252
     return retorno_medio, cov_matrix
 
-def simular_carteiras(retorno_medio, cov_matrix, num_portfolios=50000, rf=0.0):
+def simular_carteiras(retorno_medio, cov_matrix, num_portfolios=200000, rf=0.0):
     n = len(retorno_medio)
     resultados = []
     pesos_lista = []
